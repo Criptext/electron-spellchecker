@@ -93,8 +93,8 @@ module.exports = class ContextMenuBuilder {
    *
    * @return {Promise}              Completion
    */
-  async showPopupMenu(contextInfo) {
-    let menu = await this.buildMenuForElement(contextInfo);
+  async showPopupMenu(contextInfo, suggestionClickHandler) {
+    let menu = await this.buildMenuForElement(contextInfo, suggestionClickHandler);
     if (!menu) return;
     menu.popup({});
   }
@@ -106,9 +106,8 @@ module.exports = class ContextMenuBuilder {
    *
    * @return {Promise<Menu>}      The newly created `Menu`
    */
-  async buildMenuForElement(info) {
+  async buildMenuForElement(info, suggestionClickHandler) {
     //d(`Got context menu event with args: ${JSON.stringify(info)}`);
-
     if (info.linkURL && info.linkURL.length > 0) {
       return this.buildMenuForLink(info);
     }
@@ -118,7 +117,7 @@ module.exports = class ContextMenuBuilder {
     }
 
     if (info.isEditable || (info.inputFieldType && info.inputFieldType !== 'none')) {
-      return await this.buildMenuForTextInput(info);
+      return await this.buildMenuForTextInput(info, suggestionClickHandler);
     }
 
     return this.buildMenuForText(info);
@@ -129,18 +128,14 @@ module.exports = class ContextMenuBuilder {
    *
    * @return {Menu}  The `Menu`
    */
-  async buildMenuForTextInput(menuInfo) {
+  async buildMenuForTextInput(menuInfo, clickHandler) {
     let menu = new Menu();
-
-    await this.addSpellingItems(menu, menuInfo);
+    await this.addSpellingItems(menu, menuInfo, clickHandler);
     this.addSearchItems(menu, menuInfo);
-
     this.addCut(menu, menuInfo);
     this.addCopy(menu, menuInfo);
     this.addPaste(menu, menuInfo);
-    this.addInspectElement(menu, menuInfo);
     this.processMenu(menu, menuInfo);
-
     return menu;
   }
 
@@ -161,6 +156,7 @@ module.exports = class ContextMenuBuilder {
           menuInfo.linkText : menuInfo.linkURL);
       }
     });
+    menu.append(copyLink);
 
     let openLink = new MenuItem({
       label: this.stringTable.openLinkUrl(),
@@ -169,16 +165,12 @@ module.exports = class ContextMenuBuilder {
         shell.openExternal(menuInfo.linkURL);
       }
     });
-
-    menu.append(copyLink);
     menu.append(openLink);
 
     if (this.isSrcUrlValid(menuInfo)) {
       this.addSeparator(menu);
       this.addImageItems(menu, menuInfo);
     }
-
-    this.addInspectElement(menu, menuInfo);
     this.processMenu(menu, menuInfo);
 
     return menu;
@@ -191,12 +183,9 @@ module.exports = class ContextMenuBuilder {
    */
   buildMenuForText(menuInfo) {
     let menu = new Menu();
-
     this.addSearchItems(menu, menuInfo);
     this.addCopy(menu, menuInfo);
-    this.addInspectElement(menu, menuInfo);
     this.processMenu(menu, menuInfo);
-
     return menu;
   }
 
@@ -207,13 +196,10 @@ module.exports = class ContextMenuBuilder {
    */
   buildMenuForImage(menuInfo) {
     let menu = new Menu();
-
     if (this.isSrcUrlValid(menuInfo)) {
       this.addImageItems(menu, menuInfo);
     }
-    this.addInspectElement(menu, menuInfo);
     this.processMenu(menu, menuInfo);
-
     return menu;
   }
 
@@ -221,30 +207,25 @@ module.exports = class ContextMenuBuilder {
    * Checks if the current text selection contains a single misspelled word and
    * if so, adds suggested spellings as individual menu items.
    */
-  async addSpellingItems(menu, menuInfo) {
+  async addSpellingItems(menu, menuInfo, replacerHandler) {
     let target = this.getWebContents();
-    if (!menuInfo.misspelledWord || menuInfo.misspelledWord.length < 1) {
-      return menu;
-    }
+    if (!menuInfo.misspelledWord || menuInfo.misspelledWord.length < 1) return menu;
 
     // Ensure that we have a spell-checker for this language
-    if (!this.spellCheckHandler.currentSpellchecker) {
-      return menu;
-    }
+    if (!this.spellCheckHandler.currentSpellchecker) return menu;
 
     // Ensure that we have valid corrections for that word
     let corrections = await this.spellCheckHandler.getCorrectionsForMisspelling(menuInfo.misspelledWord);
-
     if (corrections && corrections.length) {
       corrections.forEach((correction) => {
         let item = new MenuItem({
           label: correction,
-          click: () => target.replaceMisspelling(correction)
+          click: replacerHandler 
+            ? () => replacerHandler(menuInfo.misspelledWord, correction)
+            : () => target.replaceMisspelling(correction)
         });
-
         menu.append(item);
       });
-
       this.addSeparator(menu);
     }
 
@@ -257,7 +238,6 @@ module.exports = class ContextMenuBuilder {
           // NB: This is a gross fix to invalidate the spelling underline,
           // refer to https://github.com/tinyspeck/slack-winssb/issues/354
           target.replaceMisspelling(menuInfo.selectionText);
-
           try {
             await this.spellCheckHandler.addToDictionary(menuInfo.misspelledWord);
           } catch (e) {
@@ -265,10 +245,8 @@ module.exports = class ContextMenuBuilder {
           }
         }
       });
-
       menu.append(learnWord);
     }
-
     return menu;
   }
 
@@ -276,23 +254,17 @@ module.exports = class ContextMenuBuilder {
    * Adds search-related menu items.
    */
   addSearchItems(menu, menuInfo) {
-    if (!menuInfo.selectionText || menuInfo.selectionText.length < 1) {
-      return menu;
-    }
+    if (!menuInfo.selectionText || menuInfo.selectionText.length < 1) return menu;
 
     let match = matchesWord(menuInfo.selectionText);
-    if (!match || match.length === 0) {
-      return menu;
-    }
+    if (!match || match.length === 0) return menu;
 
     if (process.platform === 'darwin') {
       let target = this.getWebContents();
-
       let lookUpDefinition = new MenuItem({
         label: this.stringTable.lookUpDefinition({word: truncateString(menuInfo.selectionText)}),
         click: () => target.showDefinitionForSelection()
       });
-
       menu.append(lookUpDefinition);
     }
 
@@ -300,15 +272,12 @@ module.exports = class ContextMenuBuilder {
       label: this.stringTable.searchGoogle(),
       click: () => {
         let url = `https://www.google.com/#q=${encodeURIComponent(menuInfo.selectionText)}`;
-
         //d(`Searching Google using ${url}`);
         shell.openExternal(url);
       }
     });
-
     menu.append(search);
     this.addSeparator(menu);
-
     return menu;
   }
 
@@ -325,15 +294,14 @@ module.exports = class ContextMenuBuilder {
       click: () => this.convertImageToBase64(menuInfo.srcURL,
         (dataURL) => clipboard.writeImage(nativeImage.createFromDataURL(dataURL)))
     });
-
     menu.append(copyImage);
 
     let copyImageUrl = new MenuItem({
       label: this.stringTable.copyImageUrl(),
       click: () => clipboard.writeText(menuInfo.srcURL)
     });
-
     menu.append(copyImageUrl);
+
     return menu;
   }
 
@@ -387,23 +355,6 @@ module.exports = class ContextMenuBuilder {
    */
   addSeparator(menu) {
     menu.append(new MenuItem({type: 'separator'}));
-    return menu;
-  }
-
-  /**
-   * Adds the "Inspect Element" menu item.
-   */
-  addInspectElement(menu, menuInfo, needsSeparator=true) {
-    let target = this.getWebContents();
-    if (!this.debugMode) return menu;
-    if (needsSeparator) this.addSeparator(menu);
-
-    let inspect = new MenuItem({
-      label: this.stringTable.inspectElement(),
-      click: () => target.inspectElement(menuInfo.x, menuInfo.y)
-    });
-
-    menu.append(inspect);
     return menu;
   }
 
